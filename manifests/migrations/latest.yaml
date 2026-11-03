@@ -1604,9 +1604,15 @@ data:
     (\"parcel_id\");\n-- Create trigger \"history_immutable\"\nCREATE TRIGGER \"history_immutable\"
     BEFORE DELETE OR TRUNCATE OR UPDATE ON \"geo\".\"parcel_geometry_history\" FOR
     EACH STATEMENT EXECUTE FUNCTION \"core\".\"prevent_history_tampering\"();\n"
+  20261103224643.sql: |
+    -- Drop index "idx_parcel_geometry_history_feature_id" from table: "parcel_geometry_history"
+    DROP INDEX "geo"."idx_parcel_geometry_history_feature_id";
+    -- Create index "idx_parcel_geometry_history_feature_id" to table: "parcel_geometry_history"
+    CREATE INDEX "idx_parcel_geometry_history_feature_id" ON "geo"."parcel_geometry_history" ("feature_id");
   atlas.sum: |
-    h1:zO2QU/Rg/KW/oN41ejRuU8MFp/as8uNhWwUvFUOrH3Q=
+    h1:/6166MO96AvvygzUmotxJa1HU47laZqLOhzyfjdb+qk=
     20261102223511.sql h1:RmULv5RNqWpubPDajGbRAHTo5zLWOc6dJs+9AQsj6xg=
+    20261103224643.sql h1:0+J3aIJsSpuY1LAeS1VL7S+y9Noz63Clgyc5ydPYiqc=
 kind: ConfigMap
 metadata:
-  name: civil-os-db-migrations-v0-1-2-e3a729a
+  name: civil-os-db-migrations-v0-1-3-baf22a9
