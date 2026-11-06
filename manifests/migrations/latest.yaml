@@ -1609,4 +1609,4 @@ data:
     20261106015336.sql h1:c2RuDSyMT6GdaSDhI+eYcS+fFUz96de1jvSOt2223t4=
 kind: ConfigMap
 metadata:
-  name: civil-os-db-migrations-v0-1-4-3144919
+  name: civil-os-db-migrations-v0-1-5-8b68c13
