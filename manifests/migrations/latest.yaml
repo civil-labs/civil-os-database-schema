@@ -1605,8 +1605,8 @@ data:
     BEFORE DELETE OR TRUNCATE OR UPDATE ON \"geo\".\"parcel_geometry_history\" FOR
     EACH STATEMENT EXECUTE FUNCTION \"core\".\"prevent_history_tampering\"();\n"
   atlas.sum: |
-    h1:9+r8tAI9AfFlVPdATF2uvNrtGx516wnzpM/UEbKG8U8=
-    20261106015336.sql h1:c2RuDSyMT6GdaSDhI+eYcS+fFUz96de1jvSOt2223t4=
+    h1:kG/qcUaQZbkjn7U72OOWrja/SYI8tAmWaBDHKJFQdHM=
+    20261106015336.sql h1:AZqFETpQ1uV1/+s8CHTl5XScikjhjbnayb4a+ZXUpwE=
 kind: ConfigMap
 metadata:
-  name: civil-os-db-migrations-v0-1-5-8b68c13
+  name: civil-os-db-migrations-v0-1-6-c1883a5
