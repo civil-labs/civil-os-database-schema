@@ -1604,9 +1604,482 @@ data:
     (\"parcel_id\");\n-- Create trigger \"history_immutable\"\nCREATE TRIGGER \"history_immutable\"
     BEFORE DELETE OR TRUNCATE OR UPDATE ON \"geo\".\"parcel_geometry_history\" FOR
     EACH STATEMENT EXECUTE FUNCTION \"core\".\"prevent_history_tampering\"();\n"
+  20261112011101.sql: "-- Modify \"get_parcel_tiles\" function\nCREATE OR REPLACE
+    FUNCTION \"core\".\"get_parcel_tiles\" (\"z\" integer, \"x\" integer, \"y\" integer)
+    RETURNS bytea LANGUAGE plpgsql STRICT STABLE PARALLEL SAFE AS $$\nDECLARE\n  mvt
+    bytea;\n  bounds extensions.geometry;\nBEGIN\n   -- Guard against invalid zoom
+    levels causing ST_TileEnvelope to overflow\n  IF z < 0 OR z > 24 THEN\n      RETURN
+    NULL;\n  END IF;\n      \n  bounds := extensions.ST_TileEnvelope(z, x, y);\n      \n
+    \ WITH tile AS (\n    SELECT \n        pg.feature_id AS id,\n        -- Clip the
+    geometry to the tile boundary for performance\n        extensions.ST_AsMVTGeom(extensions.ST_Transform(pg.geom_web,
+    3857), bounds, 4096, 256, true) AS geom\n    FROM \n        core.parcels p\n    JOIN\n
+    \       geo.parcel_geometry pg ON p.parcel_id = pg.parcel_id\n    WHERE \n        p.is_voided
+    = false AND\n        pg.legal_valid_range @> NOW() AND\n        extensions.ST_Intersects(pg.geom_web,
+    extensions.ST_Transform(bounds, 4326))\n  )\n  SELECT extensions.ST_AsMVT(tile,
+    'parcels', 4096, 'geom', 'id')\n  INTO mvt\n  FROM tile;\n  RETURN mvt;\nEND;\n$$;\n--
+    Modify \"get_primary_improvements\" function\nCREATE OR REPLACE FUNCTION \"core\".\"get_primary_improvements\"
+    (\"parcel_ids\" bigint[], \"target_time\" timestamptz) RETURNS TABLE (\"parcel_id\"
+    bigint, \"improvement_id\" bigint) LANGUAGE plpgsql STABLE PARALLEL SAFE AS $$\nBEGIN\n
+    \ RETURN QUERY\n  SELECT \n    sub.parcel_id, \n    sub.improvement_id\n  FROM
+    (\n    SELECT \n      pi.parcel_id,\n      pi.improvement_id,\n      ROW_NUMBER()
+    OVER (\n        PARTITION BY pi.parcel_id \n        ORDER BY \n          pi.is_primary
+    DESC, \n          COALESCE(ia.area_sq_m, 0.0) DESC, \n          pi.improvement_id
+    ASC\n      ) as rn\n    FROM \n      core.parcel_improvements pi\n    LEFT JOIN
+    \n      core.improvement_attributes ia ON pi.improvement_id = ia.improvement_id
+    \n      AND ia.legal_valid_range @> target_time\n    WHERE \n      pi.parcel_id
+    = ANY(parcel_ids)\n      AND pi.legal_valid_range @> target_time\n  ) AS sub\n
+    \ WHERE \n    sub.rn = 1;\nEND;\n$$;\n-- Modify \"record_address_attributes_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_address_attributes_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.address_attributes_history (\n      address_attribute_id,\n
+    \     address_id,\n      country_id,\n      administrative_area_id,\n      locality,\n
+    \     sublocality,\n      postal_code,\n      address_line_1,\n      address_line_2,\n
+    \     address_line_3,\n      formatted_address,\n      coordinates,\n      legal_valid_range,\n
+    \     system_valid_range,\n      trace_id\n    ) VALUES (\n      OLD.address_attribute_id,\n
+    \     OLD.address_id,\n      OLD.country_id,\n      OLD.administrative_area_id,\n
+    \     OLD.locality,\n      OLD.sublocality,\n      OLD.postal_code,\n      OLD.address_line_1,\n
+    \     OLD.address_line_2,\n      OLD.address_line_3,\n      OLD.formatted_address,\n
+    \     OLD.coordinates,\n      OLD.legal_valid_range,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_addresses_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_addresses_history\" ()
+    RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.addresses_history (\n      address_id,\n      public_id,\n
+    \     legacy_id,\n      is_voided,\n      voided_at,\n      system_valid_range,\n
+    \     trace_id\n    ) VALUES (\n      OLD.address_id,\n      OLD.public_id,\n
+    \     OLD.legacy_id,\n      OLD.is_voided,\n      OLD.voided_at,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_improvement_attributes_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_improvement_attributes_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.improvement_attributes_history (\n      improvement_attribute_id,\n
+    \     improvement_id,\n      address_id,\n      improvement_type_id,\n      improvement_condition_id,\n
+    \     improvement_quality_id,\n      area_sq_m,\n      bathrooms,\n      bedrooms,\n
+    \     year_built,\n      effective_year_built,\n      depreciation_modifier_override,\n
+    \     quality_adjustment_modifier_override,\n      units,\n      properties,\n
+    \     legal_valid_range,\n      system_valid_range,\n      trace_id\n    ) VALUES
+    (\n      OLD.improvement_attribute_id,\n      OLD.improvement_id,\n      OLD.address_id,\n
+    \     OLD.improvement_type_id,\n      OLD.improvement_condition_id,\n      OLD.improvement_quality_id,\n
+    \     OLD.area_sq_m,\n      OLD.bathrooms,\n      OLD.bedrooms,\n      OLD.year_built,\n
+    \     OLD.effective_year_built,\n      OLD.depreciation_modifier_override,\n      OLD.quality_adjustment_modifier_override,\n
+    \     OLD.units,\n      OLD.properties,\n      OLD.legal_valid_range,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_improvement_condition_attributes_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_improvement_condition_attributes_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.improvement_condition_attributes_history (\n      improvement_condition_attribute_id,\n
+    \     improvement_condition_id,\n      name,\n      depreciation_modifier,\n      legal_valid_range,\n
+    \     system_valid_range,\n      trace_id\n    ) VALUES (\n      OLD.improvement_condition_attribute_id,\n
+    \     OLD.improvement_condition_id,\n      OLD.name,\n      OLD.depreciation_modifier,\n
+    \     OLD.legal_valid_range,\n      tstzrange(OLD.system_updated_at, current_transaction_time,
+    '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n  -- Safely route the
+    return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures the record's system
+    log is updated for the proper time\n      NEW.system_updated_at = current_transaction_time;\n
+    \     RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n
+    \       \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_improvement_conditions_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_improvement_conditions_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.improvement_conditions_history (\n      improvement_condition_id,\n
+    \     public_id,\n      legacy_id,\n      is_voided,\n      voided_at,\n      system_valid_range,\n
+    \     trace_id\n    ) VALUES (\n      OLD.improvement_condition_id,\n      OLD.public_id,\n
+    \     OLD.legacy_id,\n      OLD.is_voided,\n      OLD.voided_at,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_improvement_geometry_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_improvement_geometry_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO geo.improvement_geometry_history (\n      improvement_geometry_id,\n
+    \     improvement_id,\n      geom_web,\n      geom_legal,\n      local_horizontal_srid,\n
+    \     local_vertical_datum,\n      legal_valid_range,\n      system_valid_range,\n
+    \     trace_id\n    ) VALUES (\n      OLD.improvement_geometry_id,\n      OLD.improvement_id,\n
+    \     OLD.geom_web,\n      OLD.geom_legal,\n      OLD.local_horizontal_srid,\n
+    \     OLD.local_vertical_datum,\n      OLD.legal_valid_range,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_improvement_parties_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_improvement_parties_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.improvement_parties_history (\n      improvement_party_id,\n
+    \     improvement_id,\n      party_id,\n      ownership_share,\n      legal_valid_range,\n
+    \     system_valid_range,\n      trace_id\n    ) VALUES (\n      OLD.improvement_party_id,\n
+    \     OLD.improvement_id,\n      OLD.party_id,\n      OLD.ownership_share,\n      OLD.legal_valid_range,\n
+    \     tstzrange(OLD.system_updated_at, current_transaction_time, '[)'),\n      OLD.trace_id\n
+    \   );\n  END IF;\n          \n  -- Safely route the return pointer\n  IF (TG_OP
+    = 'UPDATE') THEN\n      -- Ensures the record's system log is updated for the
+    proper time\n      NEW.system_updated_at = current_transaction_time;\n      RETURN
+    NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n        \n
+    \ RETURN NULL;\nEND;\n$$;\n-- Modify \"record_improvement_qualities_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_improvement_qualities_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.improvement_qualities_history (\n      improvement_quality_id,\n
+    \     public_id,\n      legacy_id,\n      is_voided,\n      voided_at,\n      system_valid_range,\n
+    \     trace_id\n    ) VALUES (\n      OLD.improvement_quality_id,\n      OLD.public_id,\n
+    \     OLD.legacy_id,\n      OLD.is_voided,\n      OLD.voided_at,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_improvement_quality_attributes_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_improvement_quality_attributes_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.improvement_quality_attributes_history (\n      improvement_quality_attribute_id,\n
+    \     improvement_quality_id,\n      name,\n      quality_adjustment_modifier,\n
+    \     legal_valid_range,\n      system_valid_range,\n      trace_id\n    ) VALUES
+    (\n      OLD.improvement_quality_attribute_id,\n      OLD.improvement_quality_id,\n
+    \     OLD.name,\n      OLD.quality_adjustment_modifier,\n      OLD.legal_valid_range,\n
+    \     tstzrange(OLD.system_updated_at, current_transaction_time, '[)'),\n      OLD.trace_id\n
+    \   );\n  END IF;\n          \n  -- Safely route the return pointer\n  IF (TG_OP
+    = 'UPDATE') THEN\n      -- Ensures the record's system log is updated for the
+    proper time\n      NEW.system_updated_at = current_transaction_time;\n      RETURN
+    NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n        \n
+    \ RETURN NULL;\nEND;\n$$;\n-- Modify \"record_improvement_valuations_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_improvement_valuations_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.improvement_valuations_history (\n      improvement_valuation_id,\n
+    \     improvement_id,\n      valuation_id,\n      market_value,\n      assessed_value,\n
+    \     legal_valid_range,\n      system_valid_range,\n      trace_id\n    ) VALUES
+    (\n      OLD.improvement_valuation_id,\n      OLD.improvement_id,\n      OLD.valuation_id,\n
+    \     OLD.market_value,\n      OLD.assessed_value,\n      OLD.legal_valid_range,\n
+    \     tstzrange(OLD.system_updated_at, current_transaction_time, '[)'),\n      OLD.trace_id\n
+    \   );\n  END IF;\n          \n  -- Safely route the return pointer\n  IF (TG_OP
+    = 'UPDATE') THEN\n      -- Ensures the record's system log is updated for the
+    proper time\n      NEW.system_updated_at = current_transaction_time;\n      RETURN
+    NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n        \n
+    \ RETURN NULL;\nEND;\n$$;\n-- Modify \"record_improvements_history\" function\nCREATE
+    OR REPLACE FUNCTION \"core\".\"record_improvements_history\" () RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time timestamptz
+    := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n    INSERT
+    INTO core.improvements_history (\n      improvement_id,\n      public_id,\n      legacy_id,\n
+    \     is_voided,\n      voided_at,\n      system_valid_range,\n      trace_id\n
+    \   ) VALUES (\n      OLD.improvement_id,\n      OLD.public_id,\n      OLD.legacy_id,\n
+    \     OLD.is_voided,\n      OLD.voided_at,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_neighborhood_definitions_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_neighborhood_definitions_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.neighborhood_definitions_history (\n      neighborhood_definition_id,\n
+    \     public_id,\n      legacy_id,\n      name,\n      is_legal,\n      system_valid_range,\n
+    \     trace_id\n    ) VALUES (\n      OLD.neighborhood_definition_id,\n      OLD.public_id,\n
+    \     OLD.legacy_id,\n      OLD.name,\n      OLD.is_legal,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_neighborhoods_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_neighborhoods_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.neighborhoods_history (\n      neighborhood_id,\n      public_id,\n
+    \     legacy_id,\n      name,\n      system_valid_range,\n      trace_id\n    )
+    VALUES (\n      OLD.neighborhood_id,\n      OLD.public_id,\n      OLD.legacy_id,\n
+    \     OLD.name,\n      tstzrange(OLD.system_updated_at, current_transaction_time,
+    '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n  -- Safely route the
+    return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures the record's system
+    log is updated for the proper time\n      NEW.system_updated_at = current_transaction_time;\n
+    \     RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n
+    \       \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_parcel_affordances_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_parcel_affordances_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.parcel_affordances_history (\n      parcel_affordance_id,\n
+    \     public_id,\n      parcel_id,\n      zoning_id,\n      affordance_type_id,\n
+    \     source,\n      precedence_rank,\n      max_far,\n      min_lot_size_sq_m,\n
+    \     max_height_m,\n      max_dwelling_units_per_hectare,\n      max_lot_coverage_pct,\n
+    \     legal_valid_range,\n      system_valid_range,\n      trace_id\n    ) VALUES
+    (\n      OLD.parcel_affordance_id,\n      OLD.public_id,\n      OLD.parcel_id,\n
+    \     OLD.zoning_id,\n      OLD.affordance_type_id,\n      OLD.source,\n      OLD.precedence_rank,\n
+    \     OLD.max_far,\n      OLD.min_lot_size_sq_m,\n      OLD.max_height_m,\n      OLD.max_dwelling_units_per_hectare,\n
+    \     OLD.max_lot_coverage_pct,\n      OLD.legal_valid_range,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_parcel_attributes_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_parcel_attributes_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.parcel_attributes_history (\n      parcel_attribute_id,\n
+    \     parcel_id,\n      address_id,\n      land_use_id,\n      land_area_sq_m,\n
+    \     frontage_m,\n      depth_m,\n      properties,\n      legal_valid_range,\n
+    \     system_valid_range,\n      trace_id\n    ) VALUES (\n      OLD.parcel_attribute_id,\n
+    \     OLD.parcel_id,\n      OLD.address_id,\n      OLD.land_use_id,\n      OLD.land_area_sq_m,\n
+    \     OLD.frontage_m,\n      OLD.depth_m,\n      OLD.properties,\n      OLD.legal_valid_range,\n
+    \     tstzrange(OLD.system_updated_at, current_transaction_time, '[)'),\n      OLD.trace_id\n
+    \   );\n  END IF;\n          \n  -- Safely route the return pointer\n  IF (TG_OP
+    = 'UPDATE') THEN\n      -- Ensures the record's system log is updated for the
+    proper time\n      NEW.system_updated_at = current_transaction_time;\n      RETURN
+    NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n        \n
+    \ RETURN NULL;\nEND;\n$$;\n-- Modify \"record_parcel_geometry_history\" function\nCREATE
+    OR REPLACE FUNCTION \"core\".\"record_parcel_geometry_history\" () RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time timestamptz
+    := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n    INSERT
+    INTO geo.parcel_geometry_history (\n      parcel_geometry_id,\n      parcel_id,\n
+    \     feature_id,\n      geom_web,\n      geom_legal,\n      local_srid,\n      legal_valid_range,\n
+    \     system_valid_range,\n      trace_id\n    ) VALUES (\n      OLD.parcel_geometry_id,\n
+    \     OLD.parcel_id,\n      OLD.feature_id,\n      OLD.geom_web,\n      OLD.geom_legal,\n
+    \     OLD.local_srid,\n      OLD.legal_valid_range,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_parcel_improvements_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_parcel_improvements_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.parcel_improvements_history (\n      parcel_improvement_id,\n
+    \     parcel_id,\n      improvement_id,\n      is_primary,\n      legal_valid_range,\n
+    \     system_valid_range,\n      trace_id\n    ) VALUES (\n      OLD.parcel_improvement_id,\n
+    \     OLD.parcel_id,\n      OLD.improvement_id,\n      OLD.is_primary,\n      OLD.legal_valid_range,\n
+    \     tstzrange(OLD.system_updated_at, current_transaction_time, '[)'),\n      OLD.trace_id\n
+    \   );\n  END IF;\n          \n  -- Safely route the return pointer\n  IF (TG_OP
+    = 'UPDATE') THEN\n      -- Ensures the record's system log is updated for the
+    proper time\n      NEW.system_updated_at = current_transaction_time;\n      RETURN
+    NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n        \n
+    \ RETURN NULL;\nEND;\n$$;\n-- Modify \"record_parcel_neighborhood_definitions_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_parcel_neighborhood_definitions_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.parcel_neighborhood_definitions_history (\n      parcel_neighborhood_definition_id,\n
+    \     parcel_id,\n      neighborhood_id,\n      neighborhood_definition_id,\n
+    \     is_legal,\n      legal_valid_range,\n      system_valid_range,\n      trace_id\n
+    \   ) VALUES (\n      OLD.parcel_neighborhood_definition_id,\n      OLD.parcel_id,\n
+    \     OLD.neighborhood_id,\n      OLD.neighborhood_definition_id,\n      OLD.is_legal,\n
+    \     OLD.legal_valid_range,\n      tstzrange(OLD.system_updated_at, current_transaction_time,
+    '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n  -- Safely route the
+    return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures the record's system
+    log is updated for the proper time\n      NEW.system_updated_at = current_transaction_time;\n
+    \     RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n
+    \       \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_parcel_parties_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_parcel_parties_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.parcel_parties_history (\n      parcel_party_id,\n      parcel_id,\n
+    \     party_id,\n      ownership_share,\n      legal_valid_range,\n      system_valid_range,\n
+    \     trace_id\n    ) VALUES (\n      OLD.parcel_party_id,\n      OLD.parcel_id,\n
+    \     OLD.party_id,\n      OLD.ownership_share,\n      OLD.legal_valid_range,\n
+    \     tstzrange(OLD.system_updated_at, current_transaction_time, '[)'),\n      OLD.trace_id\n
+    \   );\n  END IF;\n          \n  -- Safely route the return pointer\n  IF (TG_OP
+    = 'UPDATE') THEN\n      -- Ensures the record's system log is updated for the
+    proper time\n      NEW.system_updated_at = current_transaction_time;\n      RETURN
+    NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n        \n
+    \ RETURN NULL;\nEND;\n$$;\n-- Modify \"record_parcel_valuations_history\" function\nCREATE
+    OR REPLACE FUNCTION \"core\".\"record_parcel_valuations_history\" () RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time timestamptz
+    := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n    INSERT
+    INTO core.parcel_valuations_history (\n      parcel_valuation_id,\n      parcel_id,\n
+    \     valuation_id,\n      market_value,\n      assessed_value,\n      legal_valid_range,\n
+    \     system_valid_range,\n      trace_id\n    ) VALUES (\n      OLD.parcel_valuation_id,\n
+    \     OLD.parcel_id,\n      OLD.valuation_id,\n      OLD.market_value,\n      OLD.assessed_value,\n
+    \     OLD.legal_valid_range,\n      tstzrange(OLD.system_updated_at, current_transaction_time,
+    '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n  -- Safely route the
+    return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures the record's system
+    log is updated for the proper time\n      NEW.system_updated_at = current_transaction_time;\n
+    \     RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n
+    \       \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_parcels_history\" function\nCREATE
+    OR REPLACE FUNCTION \"core\".\"record_parcels_history\" () RETURNS trigger LANGUAGE
+    plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time timestamptz
+    := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n    INSERT
+    INTO core.parcels_history (\n      parcel_id,\n      public_id,\n      legacy_id,\n
+    \     is_voided,\n      voided_at,\n      system_valid_range,\n      trace_id\n
+    \   ) VALUES (\n      OLD.parcel_id,\n      OLD.public_id,\n      OLD.legacy_id,\n
+    \     OLD.is_voided,\n      OLD.voided_at,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_parties_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_parties_history\" () RETURNS
+    trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.parties_history (\n      party_id,\n      public_id,\n      legacy_id,\n
+    \     is_voided,\n      voided_at,\n      system_valid_range,\n      trace_id\n
+    \   ) VALUES (\n      OLD.party_id,\n      OLD.public_id,\n      OLD.legacy_id,\n
+    \     OLD.is_voided,\n      OLD.voided_at,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_party_attributes_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_party_attributes_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.party_attributes_history (\n      party_attribute_id,\n      party_id,\n
+    \     name,\n      address_id,\n      legal_valid_range,\n      system_valid_range,\n
+    \     trace_id\n    ) VALUES (\n      OLD.party_attribute_id,\n      OLD.party_id,\n
+    \     OLD.name,\n      OLD.address_id,\n      OLD.legal_valid_range,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_real_property_transfer_code_assignments_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_real_property_transfer_code_assignments_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.real_property_transfer_code_assignments_history (\n      real_property_transfer_code_assignment_id,\n
+    \     real_property_transfer_id,\n      real_property_transfer_code_id,\n      system_valid_range,\n
+    \     trace_id\n    ) VALUES (\n      OLD.real_property_transfer_code_assignment_id,\n
+    \     OLD.real_property_transfer_id,\n      OLD.real_property_transfer_code_id,\n
+    \     tstzrange(OLD.system_updated_at, current_transaction_time, '[)'),\n      OLD.trace_id\n
+    \   );\n  END IF;\n          \n  -- Safely route the return pointer\n  IF (TG_OP
+    = 'UPDATE') THEN\n      -- Ensures the record's system log is updated for the
+    proper time\n      NEW.system_updated_at = current_transaction_time;\n      RETURN
+    NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n        \n
+    \ RETURN NULL;\nEND;\n$$;\n-- Modify \"record_real_property_transfer_code_types_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_real_property_transfer_code_types_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.real_property_transfer_code_types_history (\n      real_property_transfer_code_type_id,\n
+    \     public_id,\n      legacy_id,\n      name,\n      description,\n      system_valid_range,\n
+    \     trace_id\n    ) VALUES (\n      OLD.real_property_transfer_code_type_id,\n
+    \     OLD.public_id,\n      OLD.legacy_id,\n      OLD.name,\n      OLD.description,\n
+    \     tstzrange(OLD.system_updated_at, current_transaction_time, '[)'),\n      OLD.trace_id\n
+    \   );\n  END IF;\n          \n  -- Safely route the return pointer\n  IF (TG_OP
+    = 'UPDATE') THEN\n      -- Ensures the record's system log is updated for the
+    proper time\n      NEW.system_updated_at = current_transaction_time;\n      RETURN
+    NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n        \n
+    \ RETURN NULL;\nEND;\n$$;\n-- Modify \"record_real_property_transfer_codes_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_real_property_transfer_codes_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.real_property_transfer_codes_history (\n      real_property_transfer_code_id,\n
+    \     public_id,\n      legacy_id,\n      real_property_transfer_code_type_id,\n
+    \     name,\n      description,\n      system_valid_range,\n      trace_id\n    )
+    VALUES (\n      OLD.real_property_transfer_code_id,\n      OLD.public_id,\n      OLD.legacy_id,\n
+    \     OLD.real_property_transfer_code_type_id,\n      OLD.name,\n      OLD.description,\n
+    \     tstzrange(OLD.system_updated_at, current_transaction_time, '[)'),\n      OLD.trace_id\n
+    \   );\n  END IF;\n          \n  -- Safely route the return pointer\n  IF (TG_OP
+    = 'UPDATE') THEN\n      -- Ensures the record's system log is updated for the
+    proper time\n      NEW.system_updated_at = current_transaction_time;\n      RETURN
+    NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n        \n
+    \ RETURN NULL;\nEND;\n$$;\n-- Modify \"record_real_property_transfer_party_improvements_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_real_property_transfer_party_improvements_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.real_property_transfer_party_improvements_history (\n      real_property_transfer_party_improvement_id,\n
+    \     improvement_id,\n      real_property_transfer_id,\n      party_id,\n      is_grantor,\n
+    \     transferred_share,\n      system_valid_range,\n      trace_id\n    ) VALUES
+    (\n      OLD.real_property_transfer_party_improvement_id,\n      OLD.improvement_id,\n
+    \     OLD.real_property_transfer_id,\n      OLD.party_id,\n      OLD.is_grantor,\n
+    \     OLD.transferred_share,\n      tstzrange(OLD.system_updated_at, current_transaction_time,
+    '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n  -- Safely route the
+    return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures the record's system
+    log is updated for the proper time\n      NEW.system_updated_at = current_transaction_time;\n
+    \     RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n
+    \       \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_real_property_transfer_party_parcels_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_real_property_transfer_party_parcels_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.real_property_transfer_party_parcels_history (\n      real_property_transfer_party_parcel_id,\n
+    \     parcel_id,\n      real_property_transfer_id,\n      party_id,\n      is_grantor,\n
+    \     transferred_share,\n      system_valid_range,\n      trace_id\n    ) VALUES
+    (\n      OLD.real_property_transfer_party_parcel_id,\n      OLD.parcel_id,\n      OLD.real_property_transfer_id,\n
+    \     OLD.party_id,\n      OLD.is_grantor,\n      OLD.transferred_share,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_real_property_transfers_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_real_property_transfers_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.real_property_transfers_history (\n      real_property_transfer_id,\n
+    \     public_id,\n      legacy_id,\n      transfer_timestamp,\n      transfer_amount,\n
+    \     deed_book,\n      deed_page,\n      deed_uri,\n      system_valid_range,\n
+    \     trace_id\n    ) VALUES (\n      OLD.real_property_transfer_id,\n      OLD.public_id,\n
+    \     OLD.legacy_id,\n      OLD.transfer_timestamp,\n      OLD.transfer_amount,\n
+    \     OLD.deed_book,\n      OLD.deed_page,\n      OLD.deed_uri,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_system_settings_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_system_settings_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.system_settings_history (\n      system_setting_id,\n      base_currency,\n
+    \     system_valid_range,\n      trace_id\n    ) VALUES (\n      OLD.system_setting_id,\n
+    \     OLD.base_currency,\n      tstzrange(OLD.system_updated_at, current_transaction_time,
+    '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n  -- Safely route the
+    return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures the \n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_valuations_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_valuations_history\" ()
+    RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.valuations_history (\n      valuation_id,\n      public_id,\n
+    \     legacy_id,\n      valuation_date,\n      system_valid_range,\n      trace_id\n
+    \   ) VALUES (\n      OLD.valuation_id,\n      OLD.public_id,\n      OLD.legacy_id,\n
+    \     OLD.valuation_date,\n      tstzrange(OLD.system_updated_at, current_transaction_time,
+    '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n  -- Safely route the
+    return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures the record's system
+    log is updated for the proper time\n      NEW.system_updated_at = current_transaction_time;\n
+    \     RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n      RETURN OLD;\n  END IF;\n
+    \       \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_zoning_attributes_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_zoning_attributes_history\"
+    () RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.zoning_attributes_history (\n      zoning_attribute_id,\n
+    \     zoning_id,\n      name,\n      code,\n      max_far,\n      min_lot_size_sq_m,\n
+    \     max_height_m,\n      max_dwelling_units_per_hectare,\n      max_lot_coverage_pct,\n
+    \     legal_valid_range,\n      system_valid_range,\n      trace_id\n    ) VALUES
+    (\n      OLD.zoning_attribute_id,\n      OLD.zoning_id,\n      OLD.name,\n      OLD.code,\n
+    \     OLD.max_far,\n      OLD.min_lot_size_sq_m,\n      OLD.max_height_m,\n      OLD.max_dwelling_units_per_hectare,\n
+    \     OLD.max_lot_coverage_pct,\n      OLD.legal_valid_range,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"record_zoning_history\"
+    function\nCREATE OR REPLACE FUNCTION \"core\".\"record_zoning_history\" () RETURNS
+    trigger LANGUAGE plpgsql SECURITY DEFINER AS $$\nDECLARE\n  current_transaction_time
+    timestamptz := now();\nBEGIN\n  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN\n
+    \   INSERT INTO core.zoning_history (\n      zoning_id,\n      public_id,\n      legacy_id,\n
+    \     is_voided,\n      voided_at,\n      system_valid_range,\n      trace_id\n
+    \   ) VALUES (\n      OLD.zoning_id,\n      OLD.public_id,\n      OLD.legacy_id,\n
+    \     OLD.is_voided,\n      OLD.voided_at,\n      tstzrange(OLD.system_updated_at,
+    current_transaction_time, '[)'),\n      OLD.trace_id\n    );\n  END IF;\n          \n
+    \ -- Safely route the return pointer\n  IF (TG_OP = 'UPDATE') THEN\n      -- Ensures
+    the record's system log is updated for the proper time\n      NEW.system_updated_at
+    = current_transaction_time;\n      RETURN NEW;\n  ELSIF (TG_OP = 'DELETE') THEN\n
+    \     RETURN OLD;\n  END IF;\n        \n  RETURN NULL;\nEND;\n$$;\n-- Modify \"generate_secure_mvt_id\"
+    function\nCREATE OR REPLACE FUNCTION \"geo\".\"generate_secure_mvt_id\" () RETURNS
+    bigint LANGUAGE plpgsql PARALLEL SAFE AS $$\nDECLARE\n    b bytea := extensions.gen_random_bytes(7);\n
+    \   res bigint := 0;\nBEGIN\n    res := (get_byte(b, 0)::bigint << 48) |\n           (get_byte(b,
+    1)::bigint << 40) |\n           (get_byte(b, 2)::bigint << 32) |\n           (get_byte(b,
+    3)::bigint << 24) |\n           (get_byte(b, 4)::bigint << 16) |\n           (get_byte(b,
+    5)::bigint << 8) |\n           (get_byte(b, 6)::bigint);\n               \n    RETURN
+    GREATEST(1, res & 9007199254740991);\nEND;\n$$;\n"
   atlas.sum: |
-    h1:kG/qcUaQZbkjn7U72OOWrja/SYI8tAmWaBDHKJFQdHM=
+    h1:knwo0Z4dqwA1ScyykJA/noaj+1YLVO2tRGHKWOZgBao=
     20261106015336.sql h1:AZqFETpQ1uV1/+s8CHTl5XScikjhjbnayb4a+ZXUpwE=
+    20261112011101.sql h1:z7ONs3BB6Qhm/LPsb/jIwO7RtL836nKh+gpQFCVnMzg=
 kind: ConfigMap
 metadata:
-  name: civil-os-db-migrations-v0-1-6-c1883a5
+  name: civil-os-db-migrations-v0-1-7-b7307fb
