@@ -1604,7 +1604,7 @@ data:
     (\"parcel_id\");\n-- Create trigger \"history_immutable\"\nCREATE TRIGGER \"history_immutable\"
     BEFORE DELETE OR TRUNCATE OR UPDATE ON \"geo\".\"parcel_geometry_history\" FOR
     EACH STATEMENT EXECUTE FUNCTION \"core\".\"prevent_history_tampering\"();\n"
-  20261112011101.sql: "-- Modify \"get_parcel_tiles\" function\nCREATE OR REPLACE
+  20261112012113.sql: "-- Modify \"get_parcel_tiles\" function\nCREATE OR REPLACE
     FUNCTION \"core\".\"get_parcel_tiles\" (\"z\" integer, \"x\" integer, \"y\" integer)
     RETURNS bytea LANGUAGE plpgsql STRICT STABLE PARALLEL SAFE AS $$\nDECLARE\n  mvt
     bytea;\n  bounds extensions.geometry;\nBEGIN\n   -- Guard against invalid zoom
@@ -2077,9 +2077,9 @@ data:
     5)::bigint << 8) |\n           (get_byte(b, 6)::bigint);\n               \n    RETURN
     GREATEST(1, res & 9007199254740991);\nEND;\n$$;\n"
   atlas.sum: |
-    h1:knwo0Z4dqwA1ScyykJA/noaj+1YLVO2tRGHKWOZgBao=
+    h1:lOvd4xf1su9Lv4+fD4Ubn8hlEIg2Py+uRN4YVS1gTrQ=
     20261106015336.sql h1:AZqFETpQ1uV1/+s8CHTl5XScikjhjbnayb4a+ZXUpwE=
-    20261112011101.sql h1:z7ONs3BB6Qhm/LPsb/jIwO7RtL836nKh+gpQFCVnMzg=
+    20261112012113.sql h1:u0+aagQ7QulP0ni9sY7O1hM8tCuLv7zlatOXTVGsHq8=
 kind: ConfigMap
 metadata:
-  name: civil-os-db-migrations-v0-1-7-b7307fb
+  name: civil-os-db-migrations-v0-1-8-88ad778
